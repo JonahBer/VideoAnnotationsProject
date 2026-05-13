@@ -38,4 +38,4 @@ def fix_data_file(input_path, output_path=None):
 
 
 # Example usage:
-fix_data_file(r"C:\Users\bergs\videoProject\_frame_annotations.txt")
+fix_data_file(r"D:\NewFolder(3)\videoProject\_frame_annotations.txt")

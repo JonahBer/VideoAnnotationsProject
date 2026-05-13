@@ -737,7 +737,7 @@ class AnnotatorApp:
 
 def main():
     # >>>>>>>> SET YOUR VIDEO FOLDER HERE (Windows path) <<<<<<<<
-    VIDEO_DIR = r"C:\Users\bergs\videoProject\Charlote_Videos"
+    VIDEO_DIR = r"D:\NewFolder(3)\videoProject\Charlote_Videos"
     # -----------------------------------------------------------
 
     if not os.path.isdir(VIDEO_DIR):
