@@ -1,0 +1,151 @@
+#!/usr/bin/env python3
+"""
+Stitch all videos in a folder into a single video.
+
+Usage:
+  python combine_videos.py "C:\path\to\folder" [-o output.mp4] [--order name|mtime] [--recursive]
+Notes:
+  - Works even if videos have different codecs: it first attempts stream copy
+    (fast, no re-encode) and auto-falls back to H.264/AAC re-encode if needed.
+  - Requires FFmpeg (and optionally ffprobe) installed. Set FFMPEG_BIN below if not on PATH.
+"""
+
+import argparse
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from typing import List
+
+# ---- CONFIG (edit if you want hardcoded paths) ----
+FFMPEG_BIN  = os.environ.get("FFMPEG_BIN", "ffmpeg")   # e.g., r"C:\Users\bergs\AppData\Local\Microsoft\WinGet\Links\ffmpeg.exe"
+FFPROBE_BIN = os.environ.get("FFPROBE_BIN", "ffprobe") # e.g., r"C:\Users\bergs\AppData\Local\Microsoft\WinGet\Links\ffprobe.exe"
+
+# Default re-encode settings if stream-copy concat is not possible
+VIDEO_CODEC = "libx264"
+CRF = "18"
+PRESET = "veryfast"
+AUDIO_CODEC = "aac"
+AUDIO_BITRATE = "192k"
+
+# File types to include
+VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".avi", ".m4v", ".webm"}
+
+# ---------------------------------------------------
+
+def has_binary(bin_name: str) -> bool:
+    return shutil.which(bin_name) is not None or Path(bin_name).exists()
+
+def run(cmd: List[str]) -> subprocess.CompletedProcess:
+    return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+_natnum = re.compile(r'(\d+)')
+def natural_key(s: str):
+    return [int(t) if t.isdigit() else t.lower() for t in _natnum.split(s)]
+
+def collect_videos(folder: Path, recursive: bool) -> List[Path]:
+    if recursive:
+        files = [p for p in folder.rglob("*") if p.suffix.lower() in VIDEO_EXTS and p.is_file()]
+    else:
+        files = [p for p in folder.iterdir() if p.suffix.lower() in VIDEO_EXTS and p.is_file()]
+    return files
+
+def write_concat_file(paths: List[Path]) -> Path:
+    tf = tempfile.NamedTemporaryFile(prefix="concat_", suffix=".txt", delete=False, mode="w", encoding="utf-8")
+    with tf as f:
+        # ffmpeg concat demuxer expects: file 'path'
+        for p in paths:
+            f.write(f"file '{p.as_posix()}'\n")
+    return Path(tf.name)
+
+def try_concat_stream_copy(list_file: Path, output: Path) -> subprocess.CompletedProcess:
+    cmd = [
+        FFMPEG_BIN,
+        "-hide_banner", "-loglevel", "error",
+        "-f", "concat", "-safe", "0",
+        "-i", str(list_file),
+        "-c", "copy",
+        "-y", str(output)
+    ]
+    return run(cmd)
+
+def concat_reencode(list_file: Path, output: Path) -> subprocess.CompletedProcess:
+    cmd = [
+        FFMPEG_BIN,
+        "-hide_banner", "-loglevel", "error",
+        "-f", "concat", "-safe", "0",
+        "-i", str(list_file),
+        "-c:v", VIDEO_CODEC, "-crf", CRF, "-preset", PRESET,
+        "-c:a", AUDIO_CODEC, "-b:a", AUDIO_BITRATE,
+        "-movflags", "+faststart",
+        "-y", str(output)
+    ]
+    return run(cmd)
+
+def main():
+    parser = argparse.ArgumentParser(description="Combine all videos in a folder into one.")
+    parser.add_argument("folder", type=str, help="Folder containing videos")
+    parser.add_argument("-o", "--output", type=str, default="combined.mp4", help="Output video file")
+    parser.add_argument("--order", choices=["name", "mtime"], default="name",
+                        help="Order to stitch videos: filename natural sort or modification time")
+    parser.add_argument("--recursive", action="store_true", help="Search videos recursively")
+    args = parser.parse_args()
+
+    if not has_binary(FFMPEG_BIN):
+        print(f"[ERROR] ffmpeg not found at '{FFMPEG_BIN}'. Set FFMPEG_BIN or put ffmpeg on PATH.", file=sys.stderr)
+        sys.exit(1)
+
+    folder = Path(args.folder).resolve()
+    if not folder.exists() or not folder.is_dir():
+        print(f"[ERROR] Not a directory: {folder}", file=sys.stderr)
+        sys.exit(1)
+
+    videos = collect_videos(folder, args.recursive)
+    if not videos:
+        print("[ERROR] No video files found.", file=sys.stderr)
+        sys.exit(1)
+
+    if args.order == "name":
+        videos.sort(key=lambda p: natural_key(p.name))
+    else:
+        videos.sort(key=lambda p: p.stat().st_mtime)
+
+    print(f"[INFO] Found {len(videos)} videos to combine:")
+    for i, p in enumerate(videos, 1):
+        print(f"  {i:3d}. {p}")
+
+    list_file = write_concat_file(videos)
+    output_path = Path(args.output).resolve()
+
+    try:
+        print("[INFO] Trying fast concat (no re-encode)...")
+        proc = try_concat_stream_copy(list_file, output_path)
+        if proc.returncode == 0 and output_path.exists() and output_path.stat().st_size > 0:
+            print(f"[DONE] Created: {output_path}")
+            return
+        else:
+            # Show brief error tail
+            tail = proc.stderr.strip().splitlines()[-5:]
+            print("[WARN] Fast concat failed. Falling back to re-encode.")
+            if tail:
+                print("       ffmpeg says:")
+                for line in tail:
+                    print("       " + line)
+    finally:
+        # keep list_file for debugging if needed; comment next line to keep it
+        pass
+
+    print("[INFO] Re-encoding to a uniform format (H.264/AAC)...")
+    proc2 = concat_reencode(list_file, output_path)
+    if proc2.returncode != 0 or not output_path.exists() or output_path.stat().st_size == 0:
+        print("[ERROR] Re-encode concat failed.", file=sys.stderr)
+        print(proc2.stderr, file=sys.stderr)
+        sys.exit(1)
+
+    print(f"[DONE] Created: {output_path}")
+
+if __name__ == "__main__":
+    main()
